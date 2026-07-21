@@ -13,7 +13,7 @@ Move study material between Neo Anki, Anki, and spreadsheets. Preview an `.apkg`
 
 ## Install
 
-Download the `.neoanki-extension` file from the latest release, then open **Settings → Extensions → Install from file** in Neo Anki. Import and export controls will appear during onboarding and in the migration area.
+Download the `.neoanki-extension` file from the latest release, then open **Extensions → Browse → Install from file** in Neo Anki. Import and export controls appear in the extension's Configure view after setup.
 
 ## Privacy and permissions
 
