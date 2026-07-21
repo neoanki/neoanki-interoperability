@@ -378,7 +378,7 @@ const templateCompatibilityFidelity = (templates: CardTemplate[]): MigrationFide
     record('templates.unsupportedFilters', unsupportedFilters, 'unsupported', 'These templates use field filters Neo Anki does not implement. Their source remains available and exportable, but study rendering falls back to the unfiltered field value.'),
     record('templates.composedFilters', composedFilters, 'unsupported', 'These templates compose multiple field filters. Neo Anki preserves the template but cannot guarantee the same rendered result.'),
     record('templates.latex', latex, 'unsupported', 'Anki LaTeX generation is not available in Neo Anki. Source markup is preserved, but generated images will only work when already present as media.'),
-    record('templates.ankiTts', ankiTts, 'unsupported', 'Anki template TTS directives are preserved but are not executed. Configure NeoAnki TTS after migration instead.'),
+    record('templates.ankiTts', ankiTts, 'unsupported', 'Anki template TTS directives are preserved but are not executed. Configure Text to Speech after import instead.'),
     record('templates.sandboxedScripts', scripts, 'unsupported', 'Template JavaScript is preserved as source but blocked during study. Neo Anki does not execute imported scripts or expose application, filesystem, secret, or network access.'),
     record('templates.ankiBridgeApis', ankiBridge, 'unsupported', 'These templates call an Anki or AnkiDroid JavaScript bridge that Neo Anki does not expose.'),
     record('templates.blockedNetwork', network, 'unsupported', 'Template network requests and remote resources are blocked by the card sandbox. Package required assets as collection media.'),
