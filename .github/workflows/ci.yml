@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: neoanki-interoperability }
+      - uses: actions/checkout@v4
+        with:
+          repository: neoanki/neo-anki
+          path: neo-anki
+          ref: 4e9bc5a32fe269c5eae98001bda442620e1f04c4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci && npm run extension:sdk
+        working-directory: neo-anki
+      - run: npm ci
+        working-directory: neoanki-interoperability
+      - run: npm run typecheck && npm test
+        working-directory: neoanki-interoperability
+      - if: github.event_name == 'push'
+        run: npm run check && npm run build
+        working-directory: neoanki-interoperability
+        env:
+          NEO_ANKI_EXTENSION_SIGNING_KEY: ${{ secrets.NEO_ANKI_EXTENSION_SIGNING_KEY }}

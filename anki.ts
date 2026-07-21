@@ -1,8 +1,7 @@
-import initSqlJs, { type Database, type SqlValue } from 'sql.js'
-import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url'
+import initSqlJs, { type Database, type SqlValue } from 'sql.js/dist/sql-asm.js'
 import { strToU8, Unzip, UnzipInflate, zipSync } from 'fflate'
 import { decompress } from 'fzstd'
-import type { ImportSummary, KnowledgeItem, MediaAsset, PracticeCard, PromptVariant } from '../../types'
+import type { ImportSummary, KnowledgeItem, MediaAsset, PracticeCard, PromptVariant } from './src/support.js'
 import {
   createWorkspaceDocumentV4,
   type CardTemplate,
@@ -14,10 +13,10 @@ import {
   type NoteType,
   type SourceEnvelope,
   type WorkspaceDocumentV4,
-} from '../../../packages/compatibility-domain/src/index'
-import { makeEmptyFSRSCard } from '../../lib/fsrs'
-import { createAssetFromBytes } from '../../lib/media'
-import { workspaceDocumentV4ToAppData } from '../../lib/workspace-v4'
+} from '@neo-anki/compatibility-domain'
+import { makeEmptyFSRSCard, createAssetFromBytes, workspaceDocumentV4ToAppData } from './src/support.js'
+
+const wasmUrl = ''
 
 export const MAX_ANKI_ARCHIVE_BYTES = 64 * 1024 * 1024
 const MAX_EXPANDED_BYTES = 256 * 1024 * 1024

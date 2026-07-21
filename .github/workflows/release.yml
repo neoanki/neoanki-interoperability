@@ -1,0 +1,56 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: neoanki-interoperability }
+      - uses: actions/checkout@v4
+        with:
+          repository: neoanki/neo-anki
+          path: neo-anki
+          ref: 4e9bc5a32fe269c5eae98001bda442620e1f04c4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci && npm run extension:sdk
+        working-directory: neo-anki
+      - run: npm ci
+        working-directory: neoanki-interoperability
+      - name: Record immutable inputs
+        shell: bash
+        run: |
+          echo "NEO_ANKI_EXTENSION_SOURCE_COMMIT=$(git -C neoanki-interoperability rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "NEO_ANKI_EXTENSION_CORE_COMMIT=$(git -C neo-anki rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Require protected signing key
+        env:
+          SIGNING_KEY: ${{ secrets.NEO_ANKI_EXTENSION_SIGNING_KEY }}
+        run: test -n "$SIGNING_KEY"
+      - run: npm run typecheck && npm test && npm run check && npm run build
+        working-directory: neoanki-interoperability
+        env:
+          NEO_ANKI_EXTENSION_SIGNING_KEY: ${{ secrets.NEO_ANKI_EXTENSION_SIGNING_KEY }}
+      - name: Verify reproducible package
+        working-directory: neoanki-interoperability
+        env:
+          NEO_ANKI_EXTENSION_SIGNING_KEY: ${{ secrets.NEO_ANKI_EXTENSION_SIGNING_KEY }}
+        run: |
+          first="$(sha256sum build/*.neoanki-extension | awk '{print $1}')"
+          npm run build >/dev/null
+          second="$(sha256sum build/*.neoanki-extension | awk '{print $1}')"
+          test "$first" = "$second"
+      - run: cd build && sha256sum *.neoanki-extension > SHA256SUMS.txt
+        working-directory: neoanki-interoperability
+      - uses: actions/attest-build-provenance@v2
+        with: { subject-path: 'neoanki-interoperability/build/*' }
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" build/*.neoanki-extension build/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag
+        working-directory: neoanki-interoperability
