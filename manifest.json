@@ -1,1 +1,29 @@
-{"format":"neo-anki-extension","schemaVersion":2,"sdkVersion":2,"id":"org.neoanki.interoperability","name":"Anki & CSV Import/Export","version":"2.0.4","publisher":"NeoAnki contributors","description":"Preview, import, and export Anki packages and CSV files with automatic rollback protection.","homepage":"https://github.com/neoanki/neoanki-interoperability","publisherKey":"MCowBQYDK2VwAyEAbdbz39ZGfPZS9/Ix+JV2ybW4qaHZZT32rk4MBvaUtxI=","permissions":["content:migrate","ui:migration"],"workerEntry":"dist/worker.js","uiEntries":[{"id":"migration","surface":"migration","entry":"dist/migration.js"}],"provenance":{"sourceCommit":"0000000000000000000000000000000000000000","coreCommit":"4aec3af3460535ed8534331790988be0298974e2","buildSystem":"neo-anki-extension-cli"}}
+{
+  "format": "neo-anki-extension",
+  "schemaVersion": 2,
+  "sdkVersion": 2,
+  "id": "org.neoanki.interoperability",
+  "name": "Anki & CSV Import/Export",
+  "version": "2.0.5",
+  "minimumNeoAnkiVersion": "0.4.0",
+  "publisher": "NeoAnki contributors",
+  "description": "Preview, import, and export Anki packages and CSV files with automatic rollback protection.",
+  "homepage": "https://github.com/neoanki/neoanki-interoperability",
+  "publisherKey": "MCowBQYDK2VwAyEAbdbz39ZGfPZS9/Ix+JV2ybW4qaHZZT32rk4MBvaUtxI=",
+  "permissions": ["content:migrate", "files:save", "ui:migration"],
+  "workerEntry": "dist/worker.js",
+  "uiEntries": [
+    {
+      "id": "migration",
+      "surface": "migration",
+      "entry": "dist/migration.js",
+      "label": "Import and export",
+      "description": "Preview Anki or CSV data before importing, or save a portable export."
+    }
+  ],
+  "provenance": {
+    "sourceCommit": "0000000000000000000000000000000000000000",
+    "coreCommit": "7ad6541f1e4a15553d6ffd31c70708ae193691fe",
+    "buildSystem": "neo-anki-extension-cli"
+  }
+}

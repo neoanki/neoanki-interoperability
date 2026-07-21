@@ -16,7 +16,7 @@ jobs:
         with:
           repository: neoanki/neo-anki
           path: neo-anki
-          ref: 4aec3af3460535ed8534331790988be0298974e2
+          ref: 7ad6541f1e4a15553d6ffd31c70708ae193691fe
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci && npm run extension:sdk
