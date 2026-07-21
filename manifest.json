@@ -4,7 +4,7 @@
   "sdkVersion": 2,
   "id": "org.neoanki.interoperability",
   "name": "Anki & CSV Import/Export",
-  "version": "2.0.5",
+  "version": "2.0.6",
   "minimumNeoAnkiVersion": "0.4.0",
   "publisher": "NeoAnki contributors",
   "description": "Preview, import, and export Anki packages and CSV files with automatic rollback protection.",
