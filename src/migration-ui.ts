@@ -1,4 +1,5 @@
 import { createSandboxedUiClient } from '@neo-anki/extension-sdk'
+import { onPrimaryColor } from './appearance.js'
 
 const css = `
   :root { color-scheme: light dark; font: var(--neo-font-size, 16px) / var(--neo-line-height, 1.5) var(--neo-font-family, Inter, ui-sans-serif, system-ui, sans-serif); }
@@ -9,7 +10,7 @@ const css = `
   button, input { font: inherit; color: inherit; }
   button { min-height: 44px; padding: 9px 14px; border: 1px solid var(--neo-border-strong, #aaa49a); border-radius: var(--neo-radius-md, 9px); background: var(--neo-surface-strong, #fff); font-weight: 700; cursor: pointer; }
   button:hover { border-color: var(--neo-primary, #6246a5); }
-  button.primary { border-color: var(--neo-primary, #6246a5); background: var(--neo-primary, #6246a5); color: #fff; }
+  button.primary { border-color: var(--neo-primary, #6246a5); background: var(--neo-primary, #6246a5); color: ${onPrimaryColor}; }
   button.primary:hover { background: var(--neo-primary-hover, #52388f); }
   input[type=file] { width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--neo-border-strong, #aaa49a); border-radius: var(--neo-radius-md, 9px); background: var(--neo-surface-strong, #fff); }
   input[type=file]::file-selector-button { min-height: 36px; margin-right: 10px; padding: 6px 10px; border: 1px solid var(--neo-border-strong, #aaa49a); border-radius: var(--neo-radius-sm, 6px); background: var(--neo-surface-muted, #f0ede6); color: var(--neo-text, #282622); font: inherit; font-weight: 700; cursor: pointer; }
