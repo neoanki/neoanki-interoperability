@@ -1,4 +1,5 @@
-import initSqlJs, { type Database, type SqlValue } from 'sql.js/dist/sql-asm.js'
+import initSqlJs, { type Database, type SqlValue } from 'sql.js'
+import embeddedSqlWasm from 'sql.js/dist/sql-wasm.wasm'
 import { strToU8, Unzip, UnzipInflate, zipSync } from 'fflate'
 import { decompress } from 'fzstd'
 import type { ImportSummary, KnowledgeItem, MediaAsset, PracticeCard, PromptVariant } from './src/support.js'
@@ -16,7 +17,8 @@ import {
 } from '@neo-anki/compatibility-domain'
 import { makeEmptyFSRSCard, createAssetFromBytes, workspaceDocumentV4ToAppData } from './src/support.js'
 
-const wasmUrl = ''
+const wasmBytes = Uint8Array.from(atob(embeddedSqlWasm.slice(embeddedSqlWasm.indexOf(',') + 1)), (character) => character.charCodeAt(0))
+const loadSql = (locateWasm?: () => string) => initSqlJs(locateWasm ? { locateFile: locateWasm } : { wasmBinary: wasmBytes.buffer as ArrayBuffer })
 
 export const MAX_ANKI_ARCHIVE_BYTES = 64 * 1024 * 1024
 const MAX_EXPANDED_BYTES = 256 * 1024 * 1024
@@ -251,7 +253,7 @@ const extractAnkiMedia = async (archive: Record<string, Uint8Array>, modernEntry
   return assets
 }
 
-export const importAnkiPackage = async (buffer: ArrayBuffer, locateWasm: () => string = () => wasmUrl): Promise<ImportSummary> => {
+export const importAnkiPackage = async (buffer: ArrayBuffer, locateWasm?: () => string): Promise<ImportSummary> => {
   const packageBytes = new Uint8Array(buffer)
   validateAnkiArchiveBounds(packageBytes)
   const archive = await unzipAnkiArchive(packageBytes)
@@ -261,7 +263,7 @@ export const importAnkiPackage = async (buffer: ArrayBuffer, locateWasm: () => s
     throw new Error('No supported Anki collection database was found in this package.')
   }
   if (databaseEntry.byteLength > MAX_DATABASE_BYTES) throw new Error('The expanded Anki database exceeds 128 MB. Split the collection before migration.')
-  const SQL = await initSqlJs({ locateFile: locateWasm })
+  const SQL = await loadSql(locateWasm)
   const database = new SQL.Database(databaseEntry)
   try {
     const normalizedSchema = tableRows(database, "SELECT name FROM sqlite_master WHERE type='table' AND name='decks'").length > 0
@@ -384,7 +386,7 @@ const templateCompatibilityFidelity = (templates: CardTemplate[]): MigrationFide
 }
 
 /** Lossless compatibility import. Known fields are mapped and every raw source row/config is retained inertly for round-trip export. */
-export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer, filename = 'collection.apkg', locateWasm: () => string = () => wasmUrl): Promise<AnkiWorkspaceV4Import> => {
+export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer, filename = 'collection.apkg', locateWasm?: () => string): Promise<AnkiWorkspaceV4Import> => {
   const packageBytes = new Uint8Array(buffer)
   validateAnkiArchiveBounds(packageBytes)
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', packageBytes))
@@ -394,7 +396,7 @@ export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer, filename = 'col
   const modernEntry = archive['collection.anki21b']
   const databaseEntry = modernEntry ? decompress(modernEntry) : archive['collection.anki21'] || archive['collection.anki2']
   if (!databaseEntry) throw new Error('No supported Anki collection database was found in this package.')
-  const SQL = await initSqlJs({ locateFile: locateWasm })
+  const SQL = await loadSql(locateWasm)
   const database = new SQL.Database(databaseEntry)
   try {
     const now = new Date().toISOString()
@@ -690,12 +692,12 @@ const prepareAnkiExport = async (input: WorkspaceDocumentV4, mediaPayloads: Medi
 export const buildAnkiExportCompatibilityReport = async (input: WorkspaceDocumentV4, mediaPayloads: MediaAsset[], target: 'apkg' | 'colpkg') => (await prepareAnkiExport(input, mediaPayloads, target)).report
 
 /** Export a Workspace v4 graph as a conservative schema-11 package accepted by current and legacy Anki. */
-export const exportAnkiWorkspaceV4 = async (input: WorkspaceDocumentV4, mediaPayloads: MediaAsset[], target: 'apkg' | 'colpkg', locateWasm: () => string = () => wasmUrl): Promise<AnkiExportV4Result> => {
+export const exportAnkiWorkspaceV4 = async (input: WorkspaceDocumentV4, mediaPayloads: MediaAsset[], target: 'apkg' | 'colpkg', locateWasm?: () => string): Promise<AnkiExportV4Result> => {
   const prepared = await prepareAnkiExport(input, mediaPayloads, target)
   if (!prepared.report.canExport) throw new Error(prepared.report.fidelity.find((record) => record.disposition === 'refused')?.detail || 'Anki export failed compatibility preflight.')
   const { document, decodedMedia, report } = prepared
   const workspace = document.workspace
-  const SQL = await initSqlJs({ locateFile: locateWasm })
+  const SQL = await loadSql(locateWasm)
   const database = new SQL.Database()
   database.run(`CREATE TABLE col (id integer PRIMARY KEY, crt integer NOT NULL, mod integer NOT NULL, scm integer NOT NULL, ver integer NOT NULL, dty integer NOT NULL, usn integer NOT NULL, ls integer NOT NULL, conf text NOT NULL, models text NOT NULL, decks text NOT NULL, dconf text NOT NULL, tags text NOT NULL);
     CREATE TABLE notes (id integer PRIMARY KEY, guid text NOT NULL, mid integer NOT NULL, mod integer NOT NULL, usn integer NOT NULL, tags text NOT NULL, flds text NOT NULL, sfld integer NOT NULL, csum integer NOT NULL, flags integer NOT NULL, data text NOT NULL);
