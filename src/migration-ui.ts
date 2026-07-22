@@ -17,8 +17,13 @@ const css = `
   button:focus-visible, input:focus-visible { outline: 3px solid var(--neo-focus, #7866b2); outline-offset: 2px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .report { padding: 12px; border: 1px solid var(--neo-border, #d7d2c8); border-radius: var(--neo-radius-md, 9px); background: var(--neo-surface-muted, #f0ede6); white-space: pre-wrap; }
+  .activity { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--neo-border, #d7d2c8); border-radius: var(--neo-radius-md, 9px); background: var(--neo-surface-muted, #f0ede6); }
+  .activity[hidden] { display: none; }
+  .activity progress { width: 100%; accent-color: var(--neo-primary, #6246a5); }
+  .activity small { color: var(--neo-text-soft, #69655d); font-variant-numeric: tabular-nums; }
   .status { min-height: 24px; margin: 0; color: var(--neo-text-soft, #69655d); }
   .status[role=alert] { color: var(--neo-danger, #a84343); }
+  button:disabled, input:disabled { cursor: not-allowed; opacity: .55; }
   @media (max-width: 520px) { .actions { align-items: stretch; flex-direction: column; } .actions button { width: 100%; } }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
 `
@@ -43,6 +48,13 @@ void createSandboxedUiClient().then((client) => {
   const report = document.createElement('div')
   report.className = 'report'
   report.hidden = true
+  const activity = document.createElement('div')
+  activity.className = 'activity'
+  activity.hidden = true
+  activity.setAttribute('aria-label', 'Import activity')
+  const activityProgress = document.createElement('progress')
+  const activityDetail = document.createElement('small')
+  activity.append(activityProgress, activityDetail)
   const status = document.createElement('p')
   status.className = 'status'
   status.setAttribute('role', 'status')
@@ -52,6 +64,34 @@ void createSandboxedUiClient().then((client) => {
     status.textContent = message
   }
   let token = ''
+  let previewInventory: Record<string, number> = {}
+  let activityTimer = 0
+  const actionButtons: HTMLButtonElement[] = []
+  const formatBytes = (bytes: number) => new Intl.NumberFormat(undefined, { style: 'unit', unit: bytes >= 1024 ** 3 ? 'gigabyte' : 'megabyte', unitDisplay: 'short', maximumFractionDigits: 1 }).format(bytes / (bytes >= 1024 ** 3 ? 1024 ** 3 : 1024 ** 2))
+  const formatElapsed = (milliseconds: number) => {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+    const minutes = Math.floor(seconds / 60)
+    return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, '0')}s elapsed` : `${seconds}s elapsed`
+  }
+  const setBusy = (busy: boolean) => {
+    input.disabled = busy
+    commit.disabled = busy
+    actionButtons.forEach((button) => { button.disabled = busy })
+  }
+  const startActivity = (detail: string) => {
+    window.clearInterval(activityTimer)
+    const startedAt = Date.now()
+    activity.hidden = false
+    activityProgress.removeAttribute('value')
+    activityDetail.textContent = `${detail} · ${formatElapsed(0)}`
+    activityTimer = window.setInterval(() => { activityDetail.textContent = `${detail} · ${formatElapsed(Date.now() - startedAt)}` }, 1_000)
+    setBusy(true)
+  }
+  const stopActivity = () => {
+    window.clearInterval(activityTimer)
+    activity.hidden = true
+    setBusy(false)
+  }
 
   const commit = document.createElement('button')
   commit.type = 'button'
@@ -60,13 +100,20 @@ void createSandboxedUiClient().then((client) => {
   commit.hidden = true
   commit.onclick = async () => {
     if (!token) return
-    setStatus('Creating a rollback checkpoint and importing…')
+    const counts = [previewInventory.notes ? `${previewInventory.notes.toLocaleString()} notes` : '', previewInventory.cards ? `${previewInventory.cards.toLocaleString()} cards` : '', previewInventory.media ? `${previewInventory.media.toLocaleString()} media files` : ''].filter(Boolean).join(', ')
+    setStatus('Creating a rollback checkpoint, verifying media, and saving the imported collection. Large imports can take several minutes…')
+    startActivity(`Importing${counts ? ` ${counts}` : ' the inspected collection'}. Keep Neo Anki open`)
     try {
       await client.call('command', { commandId: 'interop.commit', payload: { token, onboarding: initial.mode === 'onboarding', dailyMinutes: initial.dailyMinutes } })
       setStatus('Import complete. Review your collection before deleting any original files.')
       commit.hidden = true
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Import failed.', true)
+      token = ''
+      commit.hidden = true
+      input.value = ''
+      setStatus(`${error instanceof Error ? error.message : 'Import failed.'} Choose the file again to retry; the previous workspace remains available.`, true)
+    } finally {
+      stopActivity()
     }
   }
 
@@ -74,12 +121,15 @@ void createSandboxedUiClient().then((client) => {
     const file = input.files?.[0]
     if (!file) return
     token = ''
-    setStatus('Reading the selected file…')
+    previewInventory = {}
+    setStatus(`Reading and checking ${file.name} (${formatBytes(file.size)}). Large packages can take several minutes…`)
+    startActivity('Reading, validating, and unpacking locally')
     report.hidden = true
     commit.hidden = true
     try {
       const result = await client.call<{ token: string; filename: string; preflight: { inventory?: Record<string, number>; warnings?: string[]; fidelity?: Array<{ path?: string; status?: string; detail?: string }> } }>('command', { commandId: 'interop.inspect', payload: file })
       token = result.token
+      previewInventory = result.preflight.inventory || {}
       const counts = Object.entries(result.preflight.inventory || {}).map(([name, count]) => `${count} ${name}`).join(', ')
       const fidelity = (result.preflight.fidelity || []).map((entry) => [entry.path, entry.status, entry.detail].filter(Boolean).join(' — ')).join('\n')
       report.textContent = `${result.filename}: ${counts}.${fidelity ? `\n\nCompatibility details:\n${fidelity}` : ''}${result.preflight.warnings?.length ? `\n\nWarnings:\n${result.preflight.warnings.join('\n')}` : ''}`
@@ -87,7 +137,10 @@ void createSandboxedUiClient().then((client) => {
       commit.hidden = false
       setStatus('Preview ready. Review the details, then import when you are satisfied.')
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Could not read this file.', true)
+      input.value = ''
+      setStatus(`${error instanceof Error ? error.message : 'Could not read this file.'} Choose the file again to retry.`, true)
+    } finally {
+      stopActivity()
     }
   }
 
@@ -97,6 +150,7 @@ void createSandboxedUiClient().then((client) => {
     const button = document.createElement('button')
     button.type = 'button'
     button.textContent = label
+    actionButtons.push(button)
     button.onclick = async () => {
       setStatus(`Preparing ${label}…`)
       try {
@@ -110,7 +164,7 @@ void createSandboxedUiClient().then((client) => {
     actions.append(button)
   }
 
-  panel.append(copy, input, report, commit, actions, status)
+  panel.append(copy, input, activity, report, commit, actions, status)
   root.append(panel)
   client.reportHeight()
 })

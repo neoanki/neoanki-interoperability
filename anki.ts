@@ -20,50 +20,69 @@ import { makeEmptyFSRSCard, createAssetFromBytes, workspaceDocumentV4ToAppData }
 const wasmBytes = Uint8Array.from(atob(embeddedSqlWasm.slice(embeddedSqlWasm.indexOf(',') + 1)), (character) => character.charCodeAt(0))
 const loadSql = (locateWasm?: () => string) => initSqlJs(locateWasm ? { locateFile: locateWasm } : { wasmBinary: wasmBytes.buffer as ArrayBuffer })
 
-export const MAX_ANKI_ARCHIVE_BYTES = 64 * 1024 * 1024
-const MAX_EXPANDED_BYTES = 256 * 1024 * 1024
-const MAX_ENTRY_BYTES = 128 * 1024 * 1024
-const MAX_DATABASE_BYTES = 128 * 1024 * 1024
-const MAX_ENTRIES = 25_000
 const MAX_COMPRESSION_RATIO = 200
 const IMPORT_STREAM_CHUNK_BYTES = 1024 * 1024
 
 const uint16 = (bytes: Uint8Array, offset: number) => bytes[offset] | (bytes[offset + 1] << 8)
 const uint32 = (bytes: Uint8Array, offset: number) => (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0
+const uint64 = (bytes: Uint8Array, offset: number) => {
+  let value = 0n
+  for (let index = 7; index >= 0; index -= 1) value = (value << 8n) | BigInt(bytes[offset + index])
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('This Anki package is too large for this computer to address safely.')
+  return Number(value)
+}
 
 const validateArchiveEntryName = (name: string) => {
   if (!name || name.startsWith('/') || name.includes('\\') || name.split('/').some((part) => part === '..')) throw new Error(`Unsafe archive entry: ${name || '(empty)'}.`)
 }
 
 export const validateAnkiArchiveBounds = (bytes: Uint8Array) => {
-  if (bytes.byteLength > MAX_ANKI_ARCHIVE_BYTES) throw new Error('Anki packages are limited to 64 MB compressed by the in-memory importer. Split larger collections before migration.')
   let eocd = -1
   for (let index = bytes.length - 22; index >= Math.max(0, bytes.length - 65_557); index -= 1) {
     if (uint32(bytes, index) === 0x06054b50) { eocd = index; break }
   }
   if (eocd < 0) throw new Error('This file is not a complete ZIP package.')
-  const entries = uint16(bytes, eocd + 10)
-  const centralOffset = uint32(bytes, eocd + 16)
-  if (entries === 0xffff || centralOffset === 0xffffffff) throw new Error('ZIP64 Anki packages are not supported by this bounded importer.')
-  if (entries > MAX_ENTRIES) throw new Error(`Anki packages may contain at most ${MAX_ENTRIES.toLocaleString()} entries.`)
+  let entries = uint16(bytes, eocd + 10)
+  let centralOffset = uint32(bytes, eocd + 16)
+  if (entries === 0xffff || centralOffset === 0xffffffff) {
+    const locator = eocd - 20
+    if (locator < 0 || uint32(bytes, locator) !== 0x07064b50) throw new Error('The ZIP64 directory locator is missing.')
+    const zip64Offset = uint64(bytes, locator + 8)
+    if (uint32(bytes, zip64Offset) !== 0x06064b50) throw new Error('The ZIP64 directory is malformed.')
+    entries = uint64(bytes, zip64Offset + 32)
+    centralOffset = uint64(bytes, zip64Offset + 48)
+  }
   let offset = centralOffset
   let expanded = 0
   for (let index = 0; index < entries; index += 1) {
+    if (offset + 46 > bytes.length) throw new Error('The Anki ZIP directory is truncated.')
     if (uint32(bytes, offset) !== 0x02014b50) throw new Error('The Anki ZIP directory is malformed.')
     const flags = uint16(bytes, offset + 8)
-    const compressed = uint32(bytes, offset + 20)
-    const uncompressed = uint32(bytes, offset + 24)
+    let compressed = uint32(bytes, offset + 20)
+    let uncompressed = uint32(bytes, offset + 24)
     const nameLength = uint16(bytes, offset + 28)
     const extraLength = uint16(bytes, offset + 30)
     const commentLength = uint16(bytes, offset + 32)
     if ((flags & 1) !== 0) throw new Error('Encrypted ZIP entries are not supported.')
-    if (compressed === 0xffffffff || uncompressed === 0xffffffff) throw new Error('ZIP64 entries are not supported by this bounded importer.')
     const name = decode(bytes.subarray(offset + 46, offset + 46 + nameLength))
     validateArchiveEntryName(name)
-    if (uncompressed > MAX_ENTRY_BYTES) throw new Error(`Archive entry ${name} exceeds 128 MB.`)
+    if (compressed === 0xffffffff || uncompressed === 0xffffffff) {
+      let extraOffset = offset + 46 + nameLength
+      const extraEnd = extraOffset + extraLength
+      let zip64Extra = -1
+      while (extraOffset + 4 <= extraEnd) {
+        const id = uint16(bytes, extraOffset)
+        const length = uint16(bytes, extraOffset + 2)
+        if (id === 1) { zip64Extra = extraOffset + 4; break }
+        extraOffset += 4 + length
+      }
+      if (zip64Extra < 0) throw new Error(`Archive entry ${name} is missing ZIP64 size metadata.`)
+      if (uncompressed === 0xffffffff) { uncompressed = uint64(bytes, zip64Extra); zip64Extra += 8 }
+      if (compressed === 0xffffffff) compressed = uint64(bytes, zip64Extra)
+    }
     if (compressed > 0 && uncompressed / compressed > MAX_COMPRESSION_RATIO) throw new Error(`Archive entry ${name} exceeds the 200:1 compression-ratio limit.`)
     expanded += uncompressed
-    if (!Number.isSafeInteger(expanded) || expanded > MAX_EXPANDED_BYTES) throw new Error('The expanded Anki package exceeds 256 MB. Split the collection before migration.')
+    if (!Number.isSafeInteger(expanded)) throw new Error('This Anki package expands beyond this computer\'s safe address range.')
     offset += 46 + nameLength + extraLength + commentLength
     if (offset > bytes.length) throw new Error('The Anki ZIP directory is truncated.')
   }
@@ -73,7 +92,6 @@ export const validateAnkiArchiveBounds = (bytes: Uint8Array) => {
 const unzipAnkiArchive = (bytes: Uint8Array): Promise<Record<string, Uint8Array>> => new Promise((resolve, reject) => {
   const archive: Record<string, Uint8Array> = {}
   let active = 0
-  let discovered = 0
   let expanded = 0
   let inputComplete = false
   let settled = false
@@ -91,9 +109,7 @@ const unzipAnkiArchive = (bytes: Uint8Array): Promise<Record<string, Uint8Array>
     if (settled) { file.terminate(); return }
     try {
       validateArchiveEntryName(file.name)
-      discovered += 1
-      if (discovered > MAX_ENTRIES) throw new Error(`Anki packages may contain at most ${MAX_ENTRIES.toLocaleString()} entries.`)
-      if (file.originalSize !== undefined && file.originalSize > MAX_ENTRY_BYTES) throw new Error(`Archive entry ${file.name} exceeds 128 MB.`)
+      if (file.size !== undefined && file.size > 0 && file.originalSize !== undefined && file.originalSize / file.size > MAX_COMPRESSION_RATIO) throw new Error(`Archive entry ${file.name} exceeds the 200:1 compression-ratio limit.`)
       active += 1
       const chunks: Uint8Array[] = []
       let entryBytes = 0
@@ -102,8 +118,7 @@ const unzipAnkiArchive = (bytes: Uint8Array): Promise<Record<string, Uint8Array>
         if (error) { fail(error); return }
         entryBytes += chunk.byteLength
         expanded += chunk.byteLength
-        if (entryBytes > MAX_ENTRY_BYTES) { file.terminate(); fail(new Error(`Archive entry ${file.name} exceeds 128 MB.`)); return }
-        if (!Number.isSafeInteger(expanded) || expanded > MAX_EXPANDED_BYTES) { file.terminate(); fail(new Error('The expanded Anki package exceeds 256 MB. Split the collection before migration.')); return }
+        if (!Number.isSafeInteger(entryBytes) || !Number.isSafeInteger(expanded)) { file.terminate(); fail(new Error('This Anki package expands beyond this computer\'s safe address range.')); return }
         if (chunk.byteLength) chunks.push(chunk.slice())
         if (!final) return
         const entry = new Uint8Array(entryBytes)
@@ -262,7 +277,6 @@ export const importAnkiPackage = async (buffer: ArrayBuffer, locateWasm?: () => 
   if (!databaseEntry) {
     throw new Error('No supported Anki collection database was found in this package.')
   }
-  if (databaseEntry.byteLength > MAX_DATABASE_BYTES) throw new Error('The expanded Anki database exceeds 128 MB. Split the collection before migration.')
   const SQL = await loadSql(locateWasm)
   const database = new SQL.Database(databaseEntry)
   try {
@@ -650,6 +664,8 @@ const exportFidelity = (document: WorkspaceDocumentV4, target: 'apkg' | 'colpkg'
 }
 
 const decodeMediaPayload = (payload: MediaAsset) => {
+  if (payload.bytes instanceof Uint8Array) return payload.bytes
+  if (!payload.dataUrl) return undefined
   const match = /^data:[^,]*,(.*)$/s.exec(payload.dataUrl || '')
   if (!match) return undefined
   try { return payload.dataUrl?.includes(';base64,') ? Uint8Array.from(atob(match[1]), (value) => value.charCodeAt(0)) : new TextEncoder().encode(decodeURIComponent(match[1])) }
@@ -666,7 +682,7 @@ const prepareAnkiExport = async (input: WorkspaceDocumentV4, mediaPayloads: Medi
     const payload = payloadById.get(asset.id)
     const bytes = payload && decodeMediaPayload(payload)
     if (!bytes) { refused.push(`${asset.filename}: media bytes are unavailable or malformed`); continue }
-    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((value) => value.toString(16).padStart(2, '0')).join('')
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice().buffer as ArrayBuffer))].map((value) => value.toString(16).padStart(2, '0')).join('')
     if (digest !== asset.sha256) { refused.push(`${asset.filename}: expected ${asset.sha256}, received ${digest}`); continue }
     decodedMedia.set(asset.id, bytes)
   }
