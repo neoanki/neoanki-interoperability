@@ -1,6 +1,6 @@
 import initSqlJs, { type Database, type SqlValue } from 'sql.js'
 import embeddedSqlWasm from 'sql.js/dist/sql-wasm.wasm'
-import { strToU8, Unzip, UnzipInflate, zipSync } from 'fflate'
+import { strToU8, zipSync } from 'fflate'
 import { decompress } from 'fzstd'
 import type { ImportSummary, KnowledgeItem, MediaAsset, PracticeCard, PromptVariant } from './src/support.js'
 import {
@@ -21,7 +21,6 @@ const wasmBytes = Uint8Array.from(atob(embeddedSqlWasm.slice(embeddedSqlWasm.ind
 const loadSql = (locateWasm?: () => string) => initSqlJs(locateWasm ? { locateFile: locateWasm } : { wasmBinary: wasmBytes.buffer as ArrayBuffer })
 
 const MAX_COMPRESSION_RATIO = 200
-const IMPORT_STREAM_CHUNK_BYTES = 1024 * 1024
 
 const uint16 = (bytes: Uint8Array, offset: number) => bytes[offset] | (bytes[offset + 1] << 8)
 const uint32 = (bytes: Uint8Array, offset: number) => (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0
@@ -54,19 +53,22 @@ export const validateAnkiArchiveBounds = (bytes: Uint8Array) => {
   }
   let offset = centralOffset
   let expanded = 0
+  const directory: Array<{ name: string; method: number; compressed: number; uncompressed: number; localOffset: number }> = []
   for (let index = 0; index < entries; index += 1) {
     if (offset + 46 > bytes.length) throw new Error('The Anki ZIP directory is truncated.')
     if (uint32(bytes, offset) !== 0x02014b50) throw new Error('The Anki ZIP directory is malformed.')
     const flags = uint16(bytes, offset + 8)
+    const method = uint16(bytes, offset + 10)
     let compressed = uint32(bytes, offset + 20)
     let uncompressed = uint32(bytes, offset + 24)
+    let localOffset = uint32(bytes, offset + 42)
     const nameLength = uint16(bytes, offset + 28)
     const extraLength = uint16(bytes, offset + 30)
     const commentLength = uint16(bytes, offset + 32)
     if ((flags & 1) !== 0) throw new Error('Encrypted ZIP entries are not supported.')
     const name = decode(bytes.subarray(offset + 46, offset + 46 + nameLength))
     validateArchiveEntryName(name)
-    if (compressed === 0xffffffff || uncompressed === 0xffffffff) {
+    if (compressed === 0xffffffff || uncompressed === 0xffffffff || localOffset === 0xffffffff) {
       let extraOffset = offset + 46 + nameLength
       const extraEnd = extraOffset + extraLength
       let zip64Extra = -1
@@ -78,66 +80,40 @@ export const validateAnkiArchiveBounds = (bytes: Uint8Array) => {
       }
       if (zip64Extra < 0) throw new Error(`Archive entry ${name} is missing ZIP64 size metadata.`)
       if (uncompressed === 0xffffffff) { uncompressed = uint64(bytes, zip64Extra); zip64Extra += 8 }
-      if (compressed === 0xffffffff) compressed = uint64(bytes, zip64Extra)
+      if (compressed === 0xffffffff) { compressed = uint64(bytes, zip64Extra); zip64Extra += 8 }
+      if (localOffset === 0xffffffff) localOffset = uint64(bytes, zip64Extra)
     }
+    if (method !== 0 && method !== 8) throw new Error(`Archive entry ${name} uses unsupported ZIP compression method ${method}.`)
     if (compressed > 0 && uncompressed / compressed > MAX_COMPRESSION_RATIO) throw new Error(`Archive entry ${name} exceeds the 200:1 compression-ratio limit.`)
     expanded += uncompressed
     if (!Number.isSafeInteger(expanded)) throw new Error('This Anki package expands beyond this computer\'s safe address range.')
+    directory.push({ name, method, compressed, uncompressed, localOffset })
     offset += 46 + nameLength + extraLength + commentLength
     if (offset > bytes.length) throw new Error('The Anki ZIP directory is truncated.')
   }
-  return { entries, expandedBytes: expanded }
+  return { entries, expandedBytes: expanded, directory }
 }
 
-const unzipAnkiArchive = (bytes: Uint8Array): Promise<Record<string, Uint8Array>> => new Promise((resolve, reject) => {
+const unzipAnkiArchive = async (bytes: Uint8Array): Promise<Record<string, Uint8Array>> => {
+  const { directory } = validateAnkiArchiveBounds(bytes)
   const archive: Record<string, Uint8Array> = {}
-  let active = 0
-  let expanded = 0
-  let inputComplete = false
-  let settled = false
-  const fail = (error: unknown) => {
-    if (settled) return
-    settled = true
-    reject(error instanceof Error ? error : new Error('The Anki ZIP stream could not be decoded.'))
+  let cursor = 0
+  const extract = async () => {
+    while (cursor < directory.length) {
+      const entry = directory[cursor++]
+      if (uint32(bytes, entry.localOffset) !== 0x04034b50) throw new Error(`Archive entry ${entry.name} has a malformed local header.`)
+      const start = entry.localOffset + 30 + uint16(bytes, entry.localOffset + 26) + uint16(bytes, entry.localOffset + 28)
+      const compressed = bytes.subarray(start, start + entry.compressed)
+      const output = entry.method === 0
+        ? compressed.slice()
+        : new Uint8Array(await new Response(new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer())
+      if (output.byteLength !== entry.uncompressed) throw new Error(`Archive entry ${entry.name} did not expand to its declared size.`)
+      archive[entry.name] = output
+    }
   }
-  const finish = () => {
-    if (settled || !inputComplete || active !== 0) return
-    settled = true
-    resolve(archive)
-  }
-  const unzipper = new Unzip((file) => {
-    if (settled) { file.terminate(); return }
-    try {
-      validateArchiveEntryName(file.name)
-      if (file.size !== undefined && file.size > 0 && file.originalSize !== undefined && file.originalSize / file.size > MAX_COMPRESSION_RATIO) throw new Error(`Archive entry ${file.name} exceeds the 200:1 compression-ratio limit.`)
-      active += 1
-      const chunks: Uint8Array[] = []
-      let entryBytes = 0
-      file.ondata = (error, chunk, final) => {
-        if (settled) return
-        if (error) { fail(error); return }
-        entryBytes += chunk.byteLength
-        expanded += chunk.byteLength
-        if (!Number.isSafeInteger(entryBytes) || !Number.isSafeInteger(expanded)) { file.terminate(); fail(new Error('This Anki package expands beyond this computer\'s safe address range.')); return }
-        if (chunk.byteLength) chunks.push(chunk.slice())
-        if (!final) return
-        const entry = new Uint8Array(entryBytes)
-        let offset = 0
-        for (const value of chunks) { entry.set(value, offset); offset += value.byteLength }
-        archive[file.name] = entry
-        active -= 1
-        finish()
-      }
-      file.start()
-    } catch (error) { file.terminate(); fail(error) }
-  })
-  unzipper.register(UnzipInflate)
-  try {
-    for (let offset = 0; offset < bytes.byteLength && !settled; offset += IMPORT_STREAM_CHUNK_BYTES) unzipper.push(bytes.subarray(offset, Math.min(bytes.byteLength, offset + IMPORT_STREAM_CHUNK_BYTES)), offset + IMPORT_STREAM_CHUNK_BYTES >= bytes.byteLength)
-    inputComplete = true
-    finish()
-  } catch (error) { fail(error) }
-})
+  await Promise.all(Array.from({ length: Math.min(32, directory.length) }, extract))
+  return archive
+}
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
 const fieldText = (value: SqlValue | undefined) => String(value ?? '')
@@ -259,13 +235,10 @@ const extractAnkiMedia = async (archive: Record<string, Uint8Array>, modernEntry
       ? Object.fromEntries(decodeModernMediaNames(decompress(archive.media)).map((name, index) => [String(index), name]))
       : JSON.parse(decode(archive.media)) as Record<string, string>
     : {}
-  const assets: MediaAsset[] = []
-  for (const [entry, filename] of Object.entries(mediaMap)) {
+  return Promise.all(Object.entries(mediaMap).flatMap(([entry, filename]) => {
     const bytes = archive[entry]
-    if (!bytes) continue
-    assets.push(await createAssetFromBytes(filename, modernEntry ? decompress(bytes) : bytes))
-  }
-  return assets
+    return bytes ? [createAssetFromBytes(filename, modernEntry ? decompress(bytes) : bytes).then((asset) => ({ ...asset, archiveEntry: entry }))] : []
+  }))
 }
 
 export const importAnkiPackage = async (buffer: ArrayBuffer, locateWasm?: () => string): Promise<ImportSummary> => {
@@ -353,6 +326,17 @@ export interface AnkiWorkspaceV4Import {
   sourceFormat: 'anki-apkg' | 'anki-colpkg'
 }
 
+export interface InspectedAnkiArchive {
+  sourceSha256: string
+  modern: boolean
+  databaseDeflate: Uint8Array
+  mediaManifest: Uint8Array
+  archiveEntries: string[]
+  media: Array<{ entry: string; byteLength: number; sha256: string }>
+}
+
+const inflateRaw = async (bytes: Uint8Array) => new Uint8Array(await new Response(new Blob([bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer())
+
 const isoFromSeconds = (value: number, fallback: string) => Number.isFinite(value) && value > 0 ? new Date(value * 1000).toISOString() : fallback
 const ankiDueAt = (queue: number, due: number, collectionCreatedSeconds: number, now: string) => {
   if (queue === 1 || queue === 3 || queue === 4) return isoFromSeconds(due, now)
@@ -400,15 +384,16 @@ const templateCompatibilityFidelity = (templates: CardTemplate[]): MigrationFide
 }
 
 /** Lossless compatibility import. Known fields are mapped and every raw source row/config is retained inertly for round-trip export. */
-export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer, filename = 'collection.apkg', locateWasm?: () => string): Promise<AnkiWorkspaceV4Import> => {
-  const packageBytes = new Uint8Array(buffer)
-  validateAnkiArchiveBounds(packageBytes)
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', packageBytes))
-  const sourceSha256 = [...digest].map((value) => value.toString(16).padStart(2, '0')).join('')
+export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer | InspectedAnkiArchive, filename = 'collection.apkg', locateWasm?: () => string): Promise<AnkiWorkspaceV4Import> => {
+  const inspected = buffer instanceof ArrayBuffer ? undefined : buffer
+  const packageBytes = inspected ? new Uint8Array() : new Uint8Array(buffer as ArrayBuffer)
+  if (!inspected) validateAnkiArchiveBounds(packageBytes)
+  const digest = inspected ? undefined : new Uint8Array(await crypto.subtle.digest('SHA-256', packageBytes))
+  const sourceSha256 = inspected ? inspected.sourceSha256 : [...digest!].map((value) => value.toString(16).padStart(2, '0')).join('')
   const sourceFormat = /\.colpkg$/i.test(filename) ? 'anki-colpkg' as const : 'anki-apkg' as const
-  const archive = await unzipAnkiArchive(packageBytes)
-  const modernEntry = archive['collection.anki21b']
-  const databaseEntry = modernEntry ? decompress(modernEntry) : archive['collection.anki21'] || archive['collection.anki2']
+  const archive = inspected ? Object.fromEntries(inspected.archiveEntries.map((name) => [name, new Uint8Array()])) as Record<string, Uint8Array> : await unzipAnkiArchive(packageBytes)
+  const modernEntry = inspected?.modern ? new Uint8Array([1]) : archive['collection.anki21b']
+  const databaseEntry = inspected ? await inflateRaw(inspected.databaseDeflate) : modernEntry ? decompress(modernEntry) : archive['collection.anki21'] || archive['collection.anki2']
   if (!databaseEntry) throw new Error('No supported Anki collection database was found in this package.')
   const SQL = await loadSql(locateWasm)
   const database = new SQL.Database(databaseEntry)
@@ -564,9 +549,17 @@ export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer, filename = 'col
       const id = fieldText(row.id); const intervalAfter = Number(row.ivl); const intervalBefore = Number(row.lastIvl ?? row.lastivl)
       return [{ id: entityId('review', id), revision: 1, createdAt: isoFromSeconds(Number(row.id) / 1000, now), updatedAt: isoFromSeconds(Number(row.id) / 1000, now), profileId, cardId: card.id, kind: 'review' as const, rating: Math.max(1, Math.min(4, Number(row.ease))) as 1 | 2 | 3 | 4, reviewedAt: isoFromSeconds(Number(row.id) / 1000, now), durationMilliseconds: Math.max(0, Number(row.time)), intervalBefore, intervalAfter, easeFactor: Number(row.factor), scheduler: 'anki' as const, sourceEnvelopeId: addEnvelope('review', id, { row: opaqueRow(row) }) }]
     })
-    const extractedMedia = await extractAnkiMedia(archive, modernEntry)
-    const media = extractedMedia.map((asset) => ({ id: entityId('media', asset.id), revision: 1, createdAt: asset.createdAt, updatedAt: asset.updatedAt, profileId, filename: asset.filename, mimeType: asset.mimeType, byteLength: asset.byteLength, sha256: asset.hash, storageKey: asset.hash, sourceEnvelopeId: addEnvelope('media', asset.id, { filename: asset.filename, originalAssetId: asset.id }) }))
-    const mediaAssets = extractedMedia.map((asset, index) => ({ ...asset, id: media[index].id }))
+    const extractedMedia = inspected ? (() => {
+      const names = inspected.modern ? decodeModernMediaNames(inspected.mediaManifest) : JSON.parse(decode(inspected.mediaManifest) || '{}') as Record<string, string>
+      const filenameFor = (entry: string) => Array.isArray(names) ? names[Number(entry)] : names[entry]
+      const now = new Date().toISOString()
+      return inspected.media.flatMap((value) => {
+        const filename = filenameFor(value.entry)
+        return filename ? [{ id: `asset-${value.sha256.slice(0, 20)}`, filename, mimeType: 'application/octet-stream', dataUrl: 'neoanki-media://pending', bytes: undefined, byteLength: value.byteLength, hash: value.sha256, altText: '', createdAt: now, updatedAt: now, archiveEntry: value.entry }] : []
+      })
+    })() : await extractAnkiMedia(archive, modernEntry)
+    const media = extractedMedia.map((asset) => ({ id: entityId('media', asset.id), revision: 1, createdAt: asset.createdAt, updatedAt: asset.updatedAt, profileId, filename: asset.filename, mimeType: asset.mimeType, byteLength: asset.byteLength, sha256: asset.hash, storageKey: asset.hash, sourceEnvelopeId: addEnvelope('media', asset.id, { filename: asset.filename, originalAssetId: asset.archiveEntry }) }))
+    const mediaAssets = extractedMedia.map(({ archiveEntry: _archiveEntry, bytes: _bytes, ...asset }, index) => ({ ...asset, id: media[index].id }))
     const workspace = {
       version: 4 as const, workspaceId: `${prefix}:workspace`, revision: 1, deviceId: crypto.randomUUID(), createdAt: now, updatedAt: now,
       profiles: [{ id: profileId, revision: 1, createdAt: now, updatedAt: now, name: filename.replace(/\.(?:apkg|colpkg)$/i, '') || 'Anki collection', active: true, sourceEnvelopeId: sourceId('package', 'root') }],
@@ -603,7 +596,7 @@ export const importAnkiWorkspaceV4 = async (buffer: ArrayBuffer, filename = 'col
       canCommit: true,
       },
     }
-    return { document, projection, mediaAssets, sourceArchive: packageBytes.slice(), sourceSha256, sourceFormat }
+    return { document, projection, mediaAssets, sourceArchive: packageBytes, sourceSha256, sourceFormat }
   } finally { database.close() }
 }
 
